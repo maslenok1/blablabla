@@ -6,4 +6,6 @@
 
 Инструкции для автоматизации: [.cursor/automation-volozhin-tickets-prompt.md](.cursor/automation-volozhin-tickets-prompt.md)
 
-Секреты окружения: `VOLZOHIN_TICKETS_BOT_TOKEN`, опционально `VOLZOHIN_TICKETS_CHAT_ID`.
+Секреты: `VOLZOHIN_TICKETS_BOT_TOKEN`, опционально `VOLZOHIN_TICKETS_CHAT_ID`.
+
+Смена врача: `VOLZOHIN_TICKETS_ROOM_ID`, `VOLZOHIN_TICKETS_DOCTOR_MARKER`, `VOLZOHIN_TICKETS_DOCTOR_NAME` (см. промпт в `.cursor/`).

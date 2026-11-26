@@ -18,6 +18,31 @@ python3 scripts/check_volozhin_tickets.py --json
 
 Если врача нет, страница не открылась, новых талонов нет или отправка недоступна — сообщение не уходит (см. поле `action` в JSON).
 
+## Смена врача / кабинета
+
+Без правки кода — переменные окружения (или флаги CLI):
+
+| Переменная | Назначение | По умолчанию |
+|------------|------------|--------------|
+| `VOLZOHIN_TICKETS_ROOM_ID` | `room_id` в URL medic-service | `401` |
+| `VOLZOHIN_TICKETS_DOCTOR_MARKER` | Подстрока ФИО **на странице** (проверка, что открыли нужного врача) | `Прокопович` |
+| `VOLZOHIN_TICKETS_DOCTOR_NAME` | Полное ФИО **в тексте Telegram** | `Прокопович Мария Вячеславовна` |
+| `VOLZOHIN_TICKETS_ORG` | Учреждение в сообщении | `Воложинская ЦРБ` |
+| `VOLZOHIN_TICKETS_PAGE_URL` | Целиком другой URL (если не Воложин / не room_id) | из `room_id` |
+
+Пример другого врача (подставь `room_id` со страницы записи на medic-service):
+
+```bash
+export VOLZOHIN_TICKETS_ROOM_ID=123
+export VOLZOHIN_TICKETS_DOCTOR_MARKER="Иванов"
+export VOLZOHIN_TICKETS_DOCTOR_NAME="Иванов Иван Иванович"
+python3 scripts/check_volozhin_tickets.py --json
+```
+
+Или разово: `--room-id 123 --doctor-marker Иванов --doctor-name "Иванов Иван Иванович"`.
+
+**Важно:** у каждого `room_id` свой файл истории отправок (`volozhin-room-{room_id}-sent.json`), чтобы талоны разных врачей не смешивались.
+
 ## Секреты (обязательно для отправки)
 
 В секретах окружения агента должны быть:

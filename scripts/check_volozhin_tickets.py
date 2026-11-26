@@ -2,6 +2,8 @@
 """
 Проверка свободных талонов medic-service.by (статическая вёрстка, один HTTP GET).
 Состояние «уже отправлено» — JSON с sent_pairs. Токен бота только из окружения.
+
+Врача и кабинет можно менять без правки кода — см. VOLZOHIN_TICKETS_* в .cursor/automation-volozhin-tickets-prompt.md
 """
 from __future__ import annotations
 
@@ -17,25 +19,80 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-URL = "https://medic-service.by/VolozhinCRB/ticketGet/?room_id=401"
-DOCTOR_MARKER = "Прокопович"
-DOCTOR_FULL = "Прокопович Мария Вячеславовна"
-ORG_LABEL = "Воложинская ЦРБ"
-RECORD_URL = URL
+MEDIC_PAGE_TEMPLATE = (
+    "https://medic-service.by/VolozhinCRB/ticketGet/?room_id={room_id}"
+)
+DEFAULT_ROOM_ID = "401"
+DEFAULT_DOCTOR_MARKER = "Прокопович"
+DEFAULT_DOCTOR_NAME = "Прокопович Мария Вячеславовна"
+DEFAULT_ORG_LABEL = "Воложинская ЦРБ"
 USER_AGENT = (
     "Mozilla/5.0 (compatible; VolozhinTicketsMonitor/1.0; +https://medic-service.by)"
 )
 DEFAULT_CHAT_ID = "-5127409441"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_STATE_PATHS = (
-    Path("/cursor/stores/automation/memories/volozhin-prokopovich-401-sent.json"),
-    REPO_ROOT / "scripts" / ".volozhin-tickets-state.json",
-)
+MEMORY_DIR = Path("/cursor/stores/automation/memories")
+LEGACY_STATE = MEMORY_DIR / "volozhin-prokopovich-401-sent.json"
 
 TIME_ITEM_TAG = re.compile(r"<[^>]+\bTimeItem\b[^>]*>", re.IGNORECASE)
 ATTR_DATE = re.compile(r'(?:ticketDate|TicketDate)\s*=\s*["\']([^"\']+)', re.I)
 ATTR_TIME = re.compile(r'(?:ticketTime|TicketTime)\s*=\s*["\']([^"\']+)', re.I)
+
+
+@dataclass(frozen=True)
+class MonitorConfig:
+    room_id: str
+    page_url: str
+    doctor_marker: str
+    doctor_name: str
+    org_label: str
+
+    def state_path(self, override: str | None) -> Path:
+        if override:
+            return Path(override)
+        room_state = MEMORY_DIR / f"volozhin-room-{self.room_id}-sent.json"
+        if self.room_id == DEFAULT_ROOM_ID and LEGACY_STATE.is_file():
+            return LEGACY_STATE
+        if MEMORY_DIR.is_dir():
+            return room_state
+        return REPO_ROOT / "scripts" / f".volozhin-tickets-{self.room_id}-state.json"
+
+
+def load_config(
+    *,
+    room_id: str | None = None,
+    doctor_marker: str | None = None,
+    doctor_name: str | None = None,
+    org_label: str | None = None,
+    page_url: str | None = None,
+) -> MonitorConfig:
+    rid = (room_id or os.environ.get("VOLZOHIN_TICKETS_ROOM_ID") or DEFAULT_ROOM_ID).strip()
+    marker = (
+        doctor_marker
+        or os.environ.get("VOLZOHIN_TICKETS_DOCTOR_MARKER")
+        or DEFAULT_DOCTOR_MARKER
+    ).strip()
+    name = (
+        doctor_name
+        or os.environ.get("VOLZOHIN_TICKETS_DOCTOR_NAME")
+        or DEFAULT_DOCTOR_NAME
+    ).strip()
+    org = (
+        org_label or os.environ.get("VOLZOHIN_TICKETS_ORG") or DEFAULT_ORG_LABEL
+    ).strip()
+    url = (
+        page_url
+        or os.environ.get("VOLZOHIN_TICKETS_PAGE_URL")
+        or MEDIC_PAGE_TEMPLATE.format(room_id=rid)
+    ).strip()
+    return MonitorConfig(
+        room_id=rid,
+        page_url=url,
+        doctor_marker=marker,
+        doctor_name=name,
+        org_label=org,
+    )
 
 
 @dataclass
@@ -48,16 +105,6 @@ class Slot:
         return f"{self.date}|{self.time}"
 
 
-def resolve_state_path() -> Path:
-    override = os.environ.get("VOLZOHIN_TICKETS_STATE_FILE")
-    if override:
-        return Path(override)
-    for p in DEFAULT_STATE_PATHS:
-        if p.parent.exists() or p == DEFAULT_STATE_PATHS[-1]:
-            return p
-    return DEFAULT_STATE_PATHS[-1]
-
-
 def load_state(path: Path) -> dict:
     if not path.is_file():
         return {"sent_pairs": []}
@@ -68,18 +115,18 @@ def load_state(path: Path) -> dict:
     return data
 
 
-def save_state(path: Path, data: dict) -> None:
+def save_state(path: Path, data: dict, cfg: MonitorConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data["doctor"] = DOCTOR_FULL
-    data["room_id"] = "401"
+    data["doctor"] = cfg.doctor_name
+    data["room_id"] = cfg.room_id
     data["last_checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
 
 
-def fetch_html(timeout: float = 25.0) -> str:
-    req = urllib.request.Request(URL, headers={"User-Agent": USER_AGENT})
+def fetch_html(url: str, timeout: float = 25.0) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         charset = resp.headers.get_content_charset() or "utf-8"
         return resp.read().decode(charset, errors="replace")
@@ -92,7 +139,6 @@ def parse_slots(html: str) -> list[Slot]:
         tm = ATTR_TIME.search(tag)
         if dm and tm:
             slots.append(Slot(dm.group(1).strip(), tm.group(1).strip()))
-    # дедуп с сохранением порядка
     seen: set[str] = set()
     unique: list[Slot] = []
     for s in slots:
@@ -102,14 +148,14 @@ def parse_slots(html: str) -> list[Slot]:
     return unique
 
 
-def format_message(new_slots: list[Slot]) -> str:
+def format_message(new_slots: list[Slot], cfg: MonitorConfig) -> str:
     by_date: dict[str, list[str]] = {}
     for s in new_slots:
         by_date.setdefault(s.date, []).append(s.time)
     lines = [
         "Появились свободные талоны.",
-        DOCTOR_FULL,
-        ORG_LABEL,
+        cfg.doctor_name,
+        cfg.org_label,
         "",
     ]
     for date in sorted(by_date.keys()):
@@ -117,7 +163,7 @@ def format_message(new_slots: list[Slot]) -> str:
         times = ", ".join(sorted(by_date[date]))
         lines.append(f"{d.strftime('%d.%m.%Y')}: {times}")
     lines.append("")
-    lines.append(f"Запись: {RECORD_URL}")
+    lines.append(f"Запись: {cfg.page_url}")
     return "\n".join(lines)
 
 
@@ -137,7 +183,10 @@ def send_telegram(text: str, *, dry_run: bool) -> None:
         {"chat_id": chat_id, "text": text}
     ).encode("utf-8")
     req = urllib.request.Request(
-        api, data=body, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"}
+        api,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         payload = json.loads(resp.read().decode())
@@ -146,24 +195,43 @@ def send_telegram(text: str, *, dry_run: bool) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Монитор талонов Воложин ЦРБ, кабинет 401")
+    parser = argparse.ArgumentParser(
+        description="Монитор талонов medic-service.by (Воложин ЦРБ)"
+    )
+    parser.add_argument("--json", action="store_true", help="Итог JSON в stdout")
+    parser.add_argument("--dry-run", action="store_true", help="Без отправки в Telegram")
     parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Итог одной строкой JSON в stdout (без секретов)",
+        "--room-id",
+        help="room_id в URL (или VOLZOHIN_TICKETS_ROOM_ID)",
     )
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Не отправлять в Telegram, даже если есть новые талоны",
+        "--doctor-marker",
+        help="Подстрока ФИО на странице (или VOLZOHIN_TICKETS_DOCTOR_MARKER)",
+    )
+    parser.add_argument(
+        "--doctor-name",
+        help="Полное ФИО в сообщении (или VOLZOHIN_TICKETS_DOCTOR_NAME)",
+    )
+    parser.add_argument(
+        "--org",
+        help="Название учреждения в сообщении (или VOLZOHIN_TICKETS_ORG)",
     )
     args = parser.parse_args()
 
-    state_path = resolve_state_path()
+    cfg = load_config(
+        room_id=args.room_id,
+        doctor_marker=args.doctor_marker,
+        doctor_name=args.doctor_name,
+        org_label=args.org,
+    )
+    state_path = cfg.state_path(os.environ.get("VOLZOHIN_TICKETS_STATE_FILE"))
+
     result = {
         "ok": False,
         "action": "none",
         "doctor_present": False,
+        "room_id": cfg.room_id,
+        "doctor_name": cfg.doctor_name,
         "slots_total": 0,
         "slots_new": 0,
         "state_file": str(state_path),
@@ -171,8 +239,8 @@ def main() -> int:
     }
 
     try:
-        html = fetch_html()
-        result["doctor_present"] = DOCTOR_MARKER in html
+        html = fetch_html(cfg.page_url)
+        result["doctor_present"] = cfg.doctor_marker in html
         if not result["doctor_present"]:
             result["ok"] = True
             result["action"] = "skip_no_doctor"
@@ -192,14 +260,14 @@ def main() -> int:
             state["last_note"] = (
                 f"Слотов TimeItem: {len(slots)}, новых для уведомления: 0"
             )
-            save_state(state_path, state)
+            save_state(state_path, state, cfg)
             result["ok"] = True
             result["action"] = "no_new_slots"
             if args.json:
                 print(json.dumps(result, ensure_ascii=False))
             return 0
 
-        message = format_message(new_slots)
+        message = format_message(new_slots, cfg)
         send_telegram(message, dry_run=args.dry_run)
 
         if not args.dry_run:
@@ -207,7 +275,7 @@ def main() -> int:
                 sent.add(s.key)
             state["sent_pairs"] = sorted(sent)
             state["last_note"] = f"Отправлено новых слотов: {len(new_slots)}"
-            save_state(state_path, state)
+            save_state(state_path, state, cfg)
             result["action"] = "sent"
         else:
             result["action"] = "would_send"
@@ -215,7 +283,7 @@ def main() -> int:
         result["ok"] = True
         if args.json:
             print(json.dumps(result, ensure_ascii=False))
-        return 0 if args.dry_run or result["action"] == "sent" else 0
+        return 0
 
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
         result["error"] = f"fetch_failed: {e}"
