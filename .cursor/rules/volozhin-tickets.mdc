@@ -1,0 +1,12 @@
+---
+description: Монитор талонов medic-service.by — запускать скрипт, без браузера
+globs: scripts/check_volozhin_tickets.py
+alwaysApply: false
+---
+
+При часовой проверке талонов Прокопович (room_id=401):
+
+1. Сначала прочитай `.cursor/automation-volozhin-tickets-prompt.md`.
+2. Выполни только `python3 scripts/check_volozhin_tickets.py --json` — **не** Playwright, **не** ручной разбор страницы.
+3. Токен Telegram не логировать и не показывать пользователю.
+4. Не записываться на приём через сайт.
