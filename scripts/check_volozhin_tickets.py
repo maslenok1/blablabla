@@ -185,31 +185,98 @@ def format_message(
     return "\n".join(lines)
 
 
-def send_telegram(text: str, *, dry_run: bool) -> None:
-    token = os.environ.get("VOLZOHIN_TICKETS_BOT_TOKEN") or os.environ.get(
-        "TELEGRAM_BOT_TOKEN"
-    )
-    chat_id = os.environ.get("VOLZOHIN_TICKETS_CHAT_ID", DEFAULT_CHAT_ID)
-    if not token:
-        raise RuntimeError(
-            "Не задан VOLZOHIN_TICKETS_BOT_TOKEN (или TELEGRAM_BOT_TOKEN)"
-        )
-    if dry_run:
-        return
+class TelegramSendError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        description: str = "",
+        error_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.description = description
+        self.error_code = error_code
+
+
+def redact_secrets(text: str) -> str:
+    redacted = text
+    for key in ("VOLZOHIN_TICKETS_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"):
+        secret = os.environ.get(key) or ""
+        if secret:
+            redacted = redacted.replace(secret, "***")
+    return redacted
+
+
+def chat_id_candidates() -> list[str]:
+    """Сначала заданный chat id, затем чат «Dentist appointment», если это не он."""
+    raw = (os.environ.get("VOLZOHIN_TICKETS_CHAT_ID") or "").strip()
+    candidates: list[str] = []
+    if raw:
+        candidates.append(raw)
+    if DEFAULT_CHAT_ID not in candidates:
+        candidates.append(DEFAULT_CHAT_ID)
+    return candidates
+
+
+def _telegram_description(body: bytes) -> str:
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return ""
+    return str(payload.get("description") or "")
+
+
+def post_telegram(token: str, chat_id: str, text: str) -> None:
     api = f"https://api.telegram.org/bot{token}/sendMessage"
-    body = urllib.parse.urlencode(
-        {"chat_id": chat_id, "text": text}
-    ).encode("utf-8")
+    body = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
     req = urllib.request.Request(
         api,
         data=body,
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        payload = json.loads(resp.read().decode())
-        if not payload.get("ok"):
-            raise RuntimeError(f"Telegram API error: {payload!r}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        desc = _telegram_description(e.read())
+        raise TelegramSendError(
+            redact_secrets(f"telegram_http_{e.code}: {desc or e.reason}"),
+            description=desc,
+            error_code=e.code,
+        ) from None
+    if not payload.get("ok"):
+        desc = str(payload.get("description") or "")
+        raise TelegramSendError(
+            redact_secrets(f"telegram_api: {desc}"),
+            description=desc,
+        )
+
+
+def send_telegram(text: str, *, dry_run: bool) -> str:
+    token = os.environ.get("VOLZOHIN_TICKETS_BOT_TOKEN") or os.environ.get(
+        "TELEGRAM_BOT_TOKEN"
+    )
+    candidates = chat_id_candidates()
+    if not token:
+        raise TelegramSendError(
+            "Не задан VOLZOHIN_TICKETS_BOT_TOKEN (или TELEGRAM_BOT_TOKEN)"
+        )
+    if dry_run:
+        return candidates[0]
+    last: TelegramSendError | None = None
+    for index, chat_id in enumerate(candidates):
+        try:
+            post_telegram(token, chat_id, text)
+            return chat_id
+        except TelegramSendError as exc:
+            last = exc
+            missing = "chat not found" in exc.description.lower()
+            if missing and index < len(candidates) - 1:
+                continue
+            raise
+    assert last is not None
+    raise last
 
 
 def main() -> int:
@@ -240,6 +307,7 @@ def main() -> int:
         "org": None,
         "slots_total": 0,
         "slots_new": 0,
+        "chat_id": None,
         "state_file": str(state_path),
         "error": None,
     }
@@ -286,7 +354,7 @@ def main() -> int:
         message = format_message(
             new_slots, cfg, doctor_name=doctor_name, org_label=org_label
         )
-        send_telegram(message, dry_run=args.dry_run)
+        result["chat_id"] = send_telegram(message, dry_run=args.dry_run)
 
         if not args.dry_run:
             for s in new_slots:
@@ -309,14 +377,20 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False))
         return 0
 
+    except TelegramSendError as e:
+        result["error"] = redact_secrets(str(e))
+        result["action"] = "telegram_error"
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+        return 2
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-        result["error"] = f"fetch_failed: {e}"
+        result["error"] = redact_secrets(f"fetch_failed: {e}")
         result["action"] = "skip_fetch_error"
         if args.json:
             print(json.dumps(result, ensure_ascii=False))
         return 2
     except Exception as e:  # noqa: BLE001 — CLI boundary
-        result["error"] = str(e)
+        result["error"] = redact_secrets(str(e))
         result["action"] = "error"
         if args.json:
             print(json.dumps(result, ensure_ascii=False))

@@ -6,6 +6,6 @@
 
 Инструкции для автоматизации: [.cursor/automation-volozhin-tickets-prompt.md](.cursor/automation-volozhin-tickets-prompt.md)
 
-Секреты: `VOLZOHIN_TICKETS_BOT_TOKEN`, опционально `VOLZOHIN_TICKETS_CHAT_ID`.
+Секреты: `VOLZOHIN_TICKETS_BOT_TOKEN`, опционально `VOLZOHIN_TICKETS_CHAT_ID` (если чат не найден — `-5127409441`).
 
 Другой врач: только `VOLZOHIN_TICKETS_ROOM_ID` (или `--room-id`). ФИО и учреждение скрипт читает со страницы.

@@ -37,7 +37,7 @@ python3 scripts/check_volozhin_tickets.py --json
 В секретах окружения агента должны быть:
 
 - `VOLZOHIN_TICKETS_BOT_TOKEN` — токен бота (**не выводить в лог и ответ**).
-- `VOLZOHIN_TICKETS_CHAT_ID` — по умолчанию `-5127409441`, если не задан.
+- `VOLZOHIN_TICKETS_CHAT_ID` — если не задан или Telegram отвечает `chat not found`, скрипт шлёт в `-5127409441` (чат «Dentist appointment»). Короткий положительный id вроде номера кабинета чатом не является.
 
 ## Состояние между запусками
 
