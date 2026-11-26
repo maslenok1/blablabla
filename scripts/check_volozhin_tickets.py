@@ -3,11 +3,12 @@
 Проверка свободных талонов medic-service.by (статическая вёрстка, один HTTP GET).
 Состояние «уже отправлено» — JSON с sent_pairs. Токен бота только из окружения.
 
-Врача и кабинет можно менять без правки кода — см. VOLZOHIN_TICKETS_* в .cursor/automation-volozhin-tickets-prompt.md
+Меняется только room_id. ФИО врача и название учреждения читаются со страницы.
 """
 from __future__ import annotations
 
 import argparse
+import html as html_lib
 import json
 import os
 import re
@@ -23,9 +24,6 @@ MEDIC_PAGE_TEMPLATE = (
     "https://medic-service.by/VolozhinCRB/ticketGet/?room_id={room_id}"
 )
 DEFAULT_ROOM_ID = "401"
-DEFAULT_DOCTOR_MARKER = "Прокопович"
-DEFAULT_DOCTOR_NAME = "Прокопович Мария Вячеславовна"
-DEFAULT_ORG_LABEL = "Воложинская ЦРБ"
 USER_AGENT = (
     "Mozilla/5.0 (compatible; VolozhinTicketsMonitor/1.0; +https://medic-service.by)"
 )
@@ -38,15 +36,15 @@ LEGACY_STATE = MEMORY_DIR / "volozhin-prokopovich-401-sent.json"
 TIME_ITEM_TAG = re.compile(r"<[^>]+\bTimeItem\b[^>]*>", re.IGNORECASE)
 ATTR_DATE = re.compile(r'(?:ticketDate|TicketDate)\s*=\s*["\']([^"\']+)', re.I)
 ATTR_TIME = re.compile(r'(?:ticketTime|TicketTime)\s*=\s*["\']([^"\']+)', re.I)
+H3_BLOCK = re.compile(r"<h3[^>]*>(.*?)</h3>", re.I | re.S)
+H2_QUOTED = re.compile(r"<h2[^>]*>\s*«([^»]+)»", re.I)
+TITLE_QUOTED = re.compile(r"<title>[^<]*«([^»]+)»", re.I)
 
 
 @dataclass(frozen=True)
 class MonitorConfig:
     room_id: str
     page_url: str
-    doctor_marker: str
-    doctor_name: str
-    org_label: str
 
     def state_path(self, override: str | None) -> Path:
         if override:
@@ -59,40 +57,45 @@ class MonitorConfig:
         return REPO_ROOT / "scripts" / f".volozhin-tickets-{self.room_id}-state.json"
 
 
-def load_config(
-    *,
-    room_id: str | None = None,
-    doctor_marker: str | None = None,
-    doctor_name: str | None = None,
-    org_label: str | None = None,
-    page_url: str | None = None,
-) -> MonitorConfig:
+def load_config(*, room_id: str | None = None) -> MonitorConfig:
     rid = (room_id or os.environ.get("VOLZOHIN_TICKETS_ROOM_ID") or DEFAULT_ROOM_ID).strip()
-    marker = (
-        doctor_marker
-        or os.environ.get("VOLZOHIN_TICKETS_DOCTOR_MARKER")
-        or DEFAULT_DOCTOR_MARKER
-    ).strip()
-    name = (
-        doctor_name
-        or os.environ.get("VOLZOHIN_TICKETS_DOCTOR_NAME")
-        or DEFAULT_DOCTOR_NAME
-    ).strip()
-    org = (
-        org_label or os.environ.get("VOLZOHIN_TICKETS_ORG") or DEFAULT_ORG_LABEL
-    ).strip()
-    url = (
-        page_url
-        or os.environ.get("VOLZOHIN_TICKETS_PAGE_URL")
-        or MEDIC_PAGE_TEMPLATE.format(room_id=rid)
-    ).strip()
+    if not rid.isdigit():
+        raise ValueError(f"room_id должен быть числом, получено: {rid!r}")
     return MonitorConfig(
         room_id=rid,
-        page_url=url,
-        doctor_marker=marker,
-        doctor_name=name,
-        org_label=org,
+        page_url=MEDIC_PAGE_TEMPLATE.format(room_id=rid),
     )
+
+
+def _plain(fragment: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", fragment)
+    text = html_lib.unescape(text).replace("\xa0", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_doctor_name(page_html: str) -> str | None:
+    """Первый заголовок h3 с ФИО, без пометки в скобках вроде «внебюджетная деятельность»."""
+    for match in H3_BLOCK.finditer(page_html):
+        text = _plain(match.group(1))
+        if not text or text.lower().startswith("расписание"):
+            continue
+        text = re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+        words = text.split()
+        if len(words) >= 2 and re.search(r"[А-Яа-яЁё]", text):
+            return text
+    return None
+
+
+def extract_org_label(page_html: str) -> str:
+    """Название учреждения из шапки («Воложинская ЦРБ»), без префикса «УЗ»."""
+    for raw in reversed(H2_QUOTED.findall(page_html)):
+        name = re.sub(r"^УЗ\s+", "", html_lib.unescape(raw).strip())
+        if name and "medic" not in name.lower():
+            return name
+    title = TITLE_QUOTED.search(page_html)
+    if title:
+        return re.sub(r"^УЗ\s+", "", html_lib.unescape(title.group(1)).strip())
+    return ""
 
 
 @dataclass
@@ -115,9 +118,17 @@ def load_state(path: Path) -> dict:
     return data
 
 
-def save_state(path: Path, data: dict, cfg: MonitorConfig) -> None:
+def save_state(
+    path: Path,
+    data: dict,
+    cfg: MonitorConfig,
+    *,
+    doctor_name: str,
+    org_label: str,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data["doctor"] = cfg.doctor_name
+    data["doctor"] = doctor_name
+    data["org"] = org_label
     data["room_id"] = cfg.room_id
     data["last_checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with path.open("w", encoding="utf-8") as f:
@@ -148,16 +159,23 @@ def parse_slots(html: str) -> list[Slot]:
     return unique
 
 
-def format_message(new_slots: list[Slot], cfg: MonitorConfig) -> str:
+def format_message(
+    new_slots: list[Slot],
+    cfg: MonitorConfig,
+    *,
+    doctor_name: str,
+    org_label: str,
+) -> str:
     by_date: dict[str, list[str]] = {}
     for s in new_slots:
         by_date.setdefault(s.date, []).append(s.time)
     lines = [
         "Появились свободные талоны.",
-        cfg.doctor_name,
-        cfg.org_label,
-        "",
+        doctor_name,
     ]
+    if org_label:
+        lines.append(org_label)
+    lines.append("")
     for date in sorted(by_date.keys()):
         d = datetime.strptime(date, "%Y-%m-%d")
         times = ", ".join(sorted(by_date[date]))
@@ -202,28 +220,15 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Без отправки в Telegram")
     parser.add_argument(
         "--room-id",
-        help="room_id в URL (или VOLZOHIN_TICKETS_ROOM_ID)",
-    )
-    parser.add_argument(
-        "--doctor-marker",
-        help="Подстрока ФИО на странице (или VOLZOHIN_TICKETS_DOCTOR_MARKER)",
-    )
-    parser.add_argument(
-        "--doctor-name",
-        help="Полное ФИО в сообщении (или VOLZOHIN_TICKETS_DOCTOR_NAME)",
-    )
-    parser.add_argument(
-        "--org",
-        help="Название учреждения в сообщении (или VOLZOHIN_TICKETS_ORG)",
+        help="room_id в URL (или VOLZOHIN_TICKETS_ROOM_ID). ФИО и учреждение берутся со страницы.",
     )
     args = parser.parse_args()
 
-    cfg = load_config(
-        room_id=args.room_id,
-        doctor_marker=args.doctor_marker,
-        doctor_name=args.doctor_name,
-        org_label=args.org,
-    )
+    try:
+        cfg = load_config(room_id=args.room_id)
+    except ValueError as e:
+        print(json.dumps({"ok": False, "action": "error", "error": str(e)}, ensure_ascii=False))
+        return 2
     state_path = cfg.state_path(os.environ.get("VOLZOHIN_TICKETS_STATE_FILE"))
 
     result = {
@@ -231,7 +236,8 @@ def main() -> int:
         "action": "none",
         "doctor_present": False,
         "room_id": cfg.room_id,
-        "doctor_name": cfg.doctor_name,
+        "doctor_name": None,
+        "org": None,
         "slots_total": 0,
         "slots_new": 0,
         "state_file": str(state_path),
@@ -240,8 +246,12 @@ def main() -> int:
 
     try:
         html = fetch_html(cfg.page_url)
-        result["doctor_present"] = cfg.doctor_marker in html
-        if not result["doctor_present"]:
+        doctor_name = extract_doctor_name(html)
+        org_label = extract_org_label(html)
+        result["doctor_name"] = doctor_name
+        result["org"] = org_label or None
+        result["doctor_present"] = bool(doctor_name)
+        if not doctor_name:
             result["ok"] = True
             result["action"] = "skip_no_doctor"
             if args.json:
@@ -260,14 +270,22 @@ def main() -> int:
             state["last_note"] = (
                 f"Слотов TimeItem: {len(slots)}, новых для уведомления: 0"
             )
-            save_state(state_path, state, cfg)
+            save_state(
+                state_path,
+                state,
+                cfg,
+                doctor_name=doctor_name,
+                org_label=org_label,
+            )
             result["ok"] = True
             result["action"] = "no_new_slots"
             if args.json:
                 print(json.dumps(result, ensure_ascii=False))
             return 0
 
-        message = format_message(new_slots, cfg)
+        message = format_message(
+            new_slots, cfg, doctor_name=doctor_name, org_label=org_label
+        )
         send_telegram(message, dry_run=args.dry_run)
 
         if not args.dry_run:
@@ -275,7 +293,13 @@ def main() -> int:
                 sent.add(s.key)
             state["sent_pairs"] = sorted(sent)
             state["last_note"] = f"Отправлено новых слотов: {len(new_slots)}"
-            save_state(state_path, state, cfg)
+            save_state(
+                state_path,
+                state,
+                cfg,
+                doctor_name=doctor_name,
+                org_label=org_label,
+            )
             result["action"] = "sent"
         else:
             result["action"] = "would_send"

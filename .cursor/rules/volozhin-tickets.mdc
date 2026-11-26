@@ -4,7 +4,7 @@ globs: scripts/check_volozhin_tickets.py
 alwaysApply: false
 ---
 
-При часовой проверке талонов Прокопович (room_id=401):
+При часовой проверке талонов Воложинской ЦРБ (по умолчанию room_id=401, ФИО со страницы):
 
 1. Сначала прочитай `.cursor/automation-volozhin-tickets-prompt.md`.
 2. Выполни только `python3 scripts/check_volozhin_tickets.py --json` — **не** Playwright, **не** ручной разбор страницы.

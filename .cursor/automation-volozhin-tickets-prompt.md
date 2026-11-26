@@ -10,38 +10,27 @@ python3 scripts/check_volozhin_tickets.py --json
 
 Скрипт сам:
 
-1. Загружает `https://medic-service.by/VolozhinCRB/ticketGet/?room_id=401` (один GET).
-2. Проверяет, что на странице есть **Прокопович Мария Вячеславовна**.
-3. Ищет только элементы с классом **TimeItem** и атрибутами `ticketDate`/`TicketDate` и `ticketTime`/`TicketTime` (пустые ячейки календаря игнорируются).
-4. Сравнивает пары дата+время с `sent_pairs` в state-файле.
-5. При **новых** талонах шлёт **одно** сообщение в Telegram (Bot API). На приём **не записывается**.
+1. Загружает `https://medic-service.by/VolozhinCRB/ticketGet/?room_id={ROOM}` (один GET). По умолчанию `room_id=401`.
+2. Читает со страницы **ФИО врача** (первый заголовок h3, без пометки в скобках) и **учреждение** (название в «ёлочках» в шапке).
+3. Если ФИО не нашлось — ничего не отправляет (`skip_no_doctor`).
+4. Ищет только элементы с классом **TimeItem** и атрибутами `ticketDate`/`TicketDate` и `ticketTime`/`TicketTime`.
+5. Сравнивает пары дата+время с `sent_pairs` в state-файле.
+6. При **новых** талонах шлёт **одно** сообщение в Telegram. На приём **не записывается**.
 
-Если врача нет, страница не открылась, новых талонов нет или отправка недоступна — сообщение не уходит (см. поле `action` в JSON).
+Если страница не открылась, новых талонов нет или отправка недоступна — сообщение не уходит (см. поле `action` в JSON).
 
-## Смена врача / кабинета
+## Смена врача
 
-Без правки кода — переменные окружения (или флаги CLI):
-
-| Переменная | Назначение | По умолчанию |
-|------------|------------|--------------|
-| `VOLZOHIN_TICKETS_ROOM_ID` | `room_id` в URL medic-service | `401` |
-| `VOLZOHIN_TICKETS_DOCTOR_MARKER` | Подстрока ФИО **на странице** (проверка, что открыли нужного врача) | `Прокопович` |
-| `VOLZOHIN_TICKETS_DOCTOR_NAME` | Полное ФИО **в тексте Telegram** | `Прокопович Мария Вячеславовна` |
-| `VOLZOHIN_TICKETS_ORG` | Учреждение в сообщении | `Воложинская ЦРБ` |
-| `VOLZOHIN_TICKETS_PAGE_URL` | Целиком другой URL (если не Воложин / не room_id) | из `room_id` |
-
-Пример другого врача (подставь `room_id` со страницы записи на medic-service):
+Меняется **только** `room_id`. ФИО и учреждение в тексте уведомления скрипт берёт со страницы.
 
 ```bash
 export VOLZOHIN_TICKETS_ROOM_ID=123
-export VOLZOHIN_TICKETS_DOCTOR_MARKER="Иванов"
-export VOLZOHIN_TICKETS_DOCTOR_NAME="Иванов Иван Иванович"
 python3 scripts/check_volozhin_tickets.py --json
 ```
 
-Или разово: `--room-id 123 --doctor-marker Иванов --doctor-name "Иванов Иван Иванович"`.
+Или разово: `python3 scripts/check_volozhin_tickets.py --room-id 123 --json`.
 
-**Важно:** у каждого `room_id` свой файл истории отправок (`volozhin-room-{room_id}-sent.json`), чтобы талоны разных врачей не смешивались.
+У каждого `room_id` свой файл истории (`volozhin-room-{room_id}-sent.json`). Для кабинета 401, если уже есть старый файл, используется `volozhin-prokopovich-401-sent.json`.
 
 ## Секреты (обязательно для отправки)
 
@@ -58,4 +47,4 @@ python3 scripts/check_volozhin_tickets.py --json
 
 ## Отчёт в чат
 
-Кратко: `action`, `slots_total`, `slots_new`, `doctor_present`. Токен и URL с токеном не упоминать.
+Кратко: `action`, `slots_total`, `slots_new`, `doctor_name`, `org`. Токен и URL с токеном не упоминать.

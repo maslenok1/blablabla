@@ -8,4 +8,4 @@
 
 Секреты: `VOLZOHIN_TICKETS_BOT_TOKEN`, опционально `VOLZOHIN_TICKETS_CHAT_ID`.
 
-Смена врача: `VOLZOHIN_TICKETS_ROOM_ID`, `VOLZOHIN_TICKETS_DOCTOR_MARKER`, `VOLZOHIN_TICKETS_DOCTOR_NAME` (см. промпт в `.cursor/`).
+Другой врач: только `VOLZOHIN_TICKETS_ROOM_ID` (или `--room-id`). ФИО и учреждение скрипт читает со страницы.
